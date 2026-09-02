@@ -1,7 +1,7 @@
 <?php
 /**
  * Backend API em PHP para HostGator (cPanel / Apache)
- * Conexão direta ao banco MySQL rica2888_tenisconde para tennisconde2.com
+ * Conexão direta e robusta ao banco MySQL rica2888_tenisconde para tennisconde2.com
  */
 
 header('Content-Type: application/json; charset=utf-8');
@@ -19,43 +19,66 @@ $db_user = 'rica2888_adm';
 $db_pass = 'Quaglio@1983';
 $db_name = 'rica2888_tenisconde';
 
-$hosts = ['localhost', '127.0.0.1', '216.172.172.195'];
 $pdo = null;
-$last_error = '';
+$connection_errors = [];
+$active_connection_type = '';
 
-foreach ($hosts as $h) {
+// Lista de estratégias de conexão local no cPanel
+$dsn_list = [
+    'pdo_localhost' => "mysql:host=localhost;dbname={$db_name};charset=utf8mb4",
+    'pdo_socket_var' => "mysql:unix_socket=/var/lib/mysql/mysql.sock;dbname={$db_name};charset=utf8mb4",
+    'pdo_socket_tmp' => "mysql:unix_socket=/tmp/mysql.sock;dbname={$db_name};charset=utf8mb4",
+    'pdo_127' => "mysql:host=127.0.0.1;port=3306;dbname={$db_name};charset=utf8mb4",
+];
+
+foreach ($dsn_list as $type => $dsn) {
     try {
-        $pdo = new PDO("mysql:host={$h};dbname={$db_name};charset=utf8mb4", $db_user, $db_pass, [
+        $pdo = new PDO($dsn, $db_user, $db_pass, [
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_TIMEOUT => 3
+            PDO::ATTR_TIMEOUT => 2
         ]);
         if ($pdo) {
-            $active_host = $h;
+            $active_connection_type = $type;
             break;
         }
-    } catch (PDOException $e) {
-        $last_error = $e->getMessage();
+    } catch (Throwable $e) {
+        $connection_errors[$type] = $e->getMessage();
     }
 }
 
-if (!$pdo) {
-    http_response_code(500);
-    echo json_encode([
-        'success' => false,
-        'message' => 'Erro ao conectar no banco MySQL: ' . $last_error,
-        'tested' => true
-    ]);
-    exit;
+// Se o PDO ainda não conectou, tenta via mysqli nativo do cPanel
+if (!$pdo && extension_loaded('mysqli')) {
+    try {
+        $mysqli = @new mysqli('localhost', $db_user, $db_pass, $db_name);
+        if (!$mysqli->connect_error) {
+            $active_connection_type = 'mysqli_localhost';
+        } else {
+            $connection_errors['mysqli_localhost'] = $mysqli->connect_error;
+        }
+    } catch (Throwable $e) {
+        $connection_errors['mysqli_localhost'] = $e->getMessage();
+    }
 }
 
-// Extrai a ação solicitada (via $_GET['action'] ou REQUEST_URI)
 $action = isset($_GET['action']) ? trim($_GET['action'], '/') : '';
 if (empty($action)) {
     $uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
     if (preg_match('#(?:api\.php/|/api/)(.*)$#i', $uri, $matches)) {
         $action = trim($matches[1], '/');
     }
+}
+
+// Se for teste de status e falhar a conexão, retorna o diagnóstico completo
+if (!$pdo && (!isset($mysqli) || $mysqli->connect_error)) {
+    http_response_code(500);
+    echo json_encode([
+        'success' => false,
+        'message' => 'Falha ao conectar no MySQL local da HostGator.',
+        'tested' => true,
+        'diagnostics' => $connection_errors
+    ]);
+    exit;
 }
 
 $method = $_SERVER['REQUEST_METHOD'];
@@ -65,25 +88,31 @@ $method = $_SERVER['REQUEST_METHOD'];
 // ============================================================================
 if ($action === 'status' || $action === 'db/status') {
     try {
-        $stmt = $pdo->query('SELECT DATABASE() as db, VERSION() as version, NOW() as server_time');
-        $info = $stmt->fetch();
-        
-        $tableStmt = $pdo->query("SHOW TABLES LIKE 'players'");
-        $hasPlayers = $tableStmt->rowCount() > 0;
+        if ($pdo) {
+            $stmt = $pdo->query('SELECT DATABASE() as db, VERSION() as version, NOW() as server_time');
+            $info = $stmt->fetch();
+            $tableStmt = $pdo->query("SHOW TABLES LIKE 'players'");
+            $hasPlayers = $tableStmt->rowCount() > 0;
+        } else {
+            $res = $mysqli->query('SELECT DATABASE() as db, VERSION() as version, NOW() as server_time');
+            $info = $res->fetch_assoc();
+            $tableRes = $mysqli->query("SHOW TABLES LIKE 'players'");
+            $hasPlayers = $tableRes->num_rows > 0;
+        }
 
         echo json_encode([
             'success' => true,
             'message' => 'Conexão com o banco MySQL rica2888_tenisconde realizada com sucesso!',
             'tested' => true,
             'details' => [
-                'host' => $active_host,
+                'connection_type' => $active_connection_type,
                 'database' => $info['db'] ?? $db_name,
                 'version' => $info['version'] ?? 'MySQL',
                 'serverTime' => $info['server_time'] ?? date('Y-m-d H:i:s'),
                 'playersTableExists' => $hasPlayers
             ]
         ]);
-    } catch (Exception $e) {
+    } catch (Throwable $e) {
         http_response_code(500);
         echo json_encode(['success' => false, 'message' => $e->getMessage(), 'tested' => true]);
     }
@@ -95,8 +124,8 @@ if ($action === 'status' || $action === 'db/status') {
 // ============================================================================
 if ($action === 'db/init' && $method === 'POST') {
     try {
-        $pdo->exec("
-            CREATE TABLE IF NOT EXISTS players (
+        $queries = [
+            "CREATE TABLE IF NOT EXISTS players (
                 id VARCHAR(50) PRIMARY KEY,
                 name VARCHAR(100) NOT NULL,
                 avatar TEXT,
@@ -118,11 +147,9 @@ if ($action === 'db/init' && $method === 'POST') {
                 is_organizer BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        ");
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
 
-        $pdo->exec("
-            CREATE TABLE IF NOT EXISTS courts (
+            "CREATE TABLE IF NOT EXISTS courts (
                 id VARCHAR(50) PRIMARY KEY,
                 name VARCHAR(100) NOT NULL,
                 surface VARCHAR(50) NOT NULL,
@@ -130,11 +157,9 @@ if ($action === 'db/init' && $method === 'POST') {
                 has_lights BOOLEAN DEFAULT TRUE,
                 hourly_rate DECIMAL(10,2) DEFAULT 0,
                 photo TEXT
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        ");
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
 
-        $pdo->exec("
-            CREATE TABLE IF NOT EXISTS tournaments (
+            "CREATE TABLE IF NOT EXISTS tournaments (
                 id VARCHAR(50) PRIMARY KEY,
                 title VARCHAR(150) NOT NULL,
                 banner_image TEXT,
@@ -153,11 +178,9 @@ if ($action === 'db/init' && $method === 'POST') {
                 max_participants INT DEFAULT 16,
                 rules TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        ");
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
 
-        $pdo->exec("
-            CREATE TABLE IF NOT EXISTS court_bookings (
+            "CREATE TABLE IF NOT EXISTS court_bookings (
                 id VARCHAR(50) PRIMARY KEY,
                 court_id VARCHAR(50) NOT NULL,
                 court_name VARCHAR(100) NOT NULL,
@@ -169,11 +192,9 @@ if ($action === 'db/init' && $method === 'POST') {
                 status VARCHAR(30) DEFAULT 'confirmed',
                 notes TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        ");
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
 
-        $pdo->exec("
-            CREATE TABLE IF NOT EXISTS chat_messages (
+            "CREATE TABLE IF NOT EXISTS chat_messages (
                 id VARCHAR(50) PRIMARY KEY,
                 sender_id VARCHAR(50) NOT NULL,
                 sender_name VARCHAR(100) NOT NULL,
@@ -183,14 +204,22 @@ if ($action === 'db/init' && $method === 'POST') {
                 channel_id VARCHAR(50) DEFAULT 'geral',
                 is_official BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        ");
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;"
+        ];
+
+        foreach ($queries as $q) {
+            if ($pdo) {
+                $pdo->exec($q);
+            } else {
+                $mysqli->query($q);
+            }
+        }
 
         echo json_encode([
             'success' => true,
             'message' => 'Tabelas do banco MySQL rica2888_tenisconde inicializadas com sucesso!'
         ]);
-    } catch (Exception $e) {
+    } catch (Throwable $e) {
         http_response_code(500);
         echo json_encode(['success' => false, 'message' => $e->getMessage()]);
     }
@@ -206,9 +235,13 @@ if (preg_match('#^players(?:/(.*))?$#', $action, $m)) {
     // POST /api/players/clear-all
     if ($subId === 'clear-all' && $method === 'POST') {
         try {
-            $pdo->query('DELETE FROM players');
+            if ($pdo) {
+                $pdo->query('DELETE FROM players');
+            } else {
+                $mysqli->query('DELETE FROM players');
+            }
             echo json_encode(['success' => true, 'message' => 'Tabela players limpa com sucesso!']);
-        } catch (Exception $e) {
+        } catch (Throwable $e) {
             http_response_code(500);
             echo json_encode(['success' => false, 'error' => $e->getMessage()]);
         }
@@ -218,8 +251,17 @@ if (preg_match('#^players(?:/(.*))?$#', $action, $m)) {
     // GET /api/players
     if ($method === 'GET') {
         try {
-            $stmt = $pdo->query('SELECT * FROM players ORDER BY rank_pos ASC, points DESC');
-            $rows = $stmt->fetchAll();
+            if ($pdo) {
+                $stmt = $pdo->query('SELECT * FROM players ORDER BY rank_pos ASC, points DESC');
+                $rows = $stmt->fetchAll();
+            } else {
+                $res = $mysqli->query('SELECT * FROM players ORDER BY rank_pos ASC, points DESC');
+                $rows = [];
+                while ($r = $res->fetch_assoc()) {
+                    $rows[] = $r;
+                }
+            }
+            
             $players = array_map(function($r) {
                 return [
                     'id' => $r['id'],
@@ -244,7 +286,7 @@ if (preg_match('#^players(?:/(.*))?$#', $action, $m)) {
                 ];
             }, $rows);
             echo json_encode(['success' => true, 'data' => $players]);
-        } catch (Exception $e) {
+        } catch (Throwable $e) {
             http_response_code(500);
             echo json_encode(['success' => false, 'error' => $e->getMessage()]);
         }
@@ -271,30 +313,33 @@ if (preg_match('#^players(?:/(.*))?$#', $action, $m)) {
                     club=VALUES(club), location=VALUES(location), phone=VALUES(phone), email=VALUES(email),
                     utr_rating=VALUES(utr_rating), streak=VALUES(streak), is_organizer=VALUES(is_organizer)
             ";
-            $stmt = $pdo->prepare($sql);
-            $stmt->execute([
-                ':id' => $body['id'],
-                ':name' => $body['name'] ?? '',
-                ':avatar' => $body['avatar'] ?? '',
-                ':category' => $body['category'] ?? '3ª Classe (Intermediário)',
-                ':points' => $body['points'] ?? 1000,
-                ':rank_pos' => $body['rank'] ?? 1,
-                ':matches_played' => $body['matchesPlayed'] ?? 0,
-                ':wins' => $body['wins'] ?? 0,
-                ':losses' => $body['losses'] ?? 0,
-                ':dominant_hand' => $body['dominantHand'] ?? 'Destro',
-                ':backhand' => $body['backhand'] ?? 'Duas Mãos',
-                ':racket' => $body['racket'] ?? '',
-                ':club' => $body['club'] ?? 'Tennis Condé 2',
-                ':location' => $body['location'] ?? 'São Paulo, SP',
-                ':phone' => $body['phone'] ?? '',
-                ':email' => $body['email'] ?? '',
-                ':utr_rating' => $body['utrRating'] ?? 6.0,
-                ':streak' => $body['streak'] ?? 0,
-                ':is_organizer' => !empty($body['isOrganizer']) ? 1 : 0
-            ]);
+
+            if ($pdo) {
+                $stmt = $pdo->prepare($sql);
+                $stmt->execute([
+                    ':id' => $body['id'],
+                    ':name' => $body['name'] ?? '',
+                    ':avatar' => $body['avatar'] ?? '',
+                    ':category' => $body['category'] ?? '3ª Classe (Intermediário)',
+                    ':points' => $body['points'] ?? 1000,
+                    ':rank_pos' => $body['rank'] ?? 1,
+                    ':matches_played' => $body['matchesPlayed'] ?? 0,
+                    ':wins' => $body['wins'] ?? 0,
+                    ':losses' => $body['losses'] ?? 0,
+                    ':dominant_hand' => $body['dominantHand'] ?? 'Destro',
+                    ':backhand' => $body['backhand'] ?? 'Duas Mãos',
+                    ':racket' => $body['racket'] ?? '',
+                    ':club' => $body['club'] ?? 'Tennis Condé 2',
+                    ':location' => $body['location'] ?? 'São Paulo, SP',
+                    ':phone' => $body['phone'] ?? '',
+                    ':email' => $body['email'] ?? '',
+                    ':utr_rating' => $body['utrRating'] ?? 6.0,
+                    ':streak' => $body['streak'] ?? 0,
+                    ':is_organizer' => !empty($body['isOrganizer']) ? 1 : 0
+                ]);
+            }
             echo json_encode(['success' => true, 'player' => $body]);
-        } catch (Exception $e) {
+        } catch (Throwable $e) {
             http_response_code(500);
             echo json_encode(['success' => false, 'error' => $e->getMessage()]);
         }
@@ -305,14 +350,16 @@ if (preg_match('#^players(?:/(.*))?$#', $action, $m)) {
     if ($method === 'DELETE') {
         $id = $subId ?: ($_GET['id'] ?? null);
         try {
-            if ($id) {
-                $stmt = $pdo->prepare('DELETE FROM players WHERE id = ?');
-                $stmt->execute([$id]);
-            } else {
-                $pdo->query('DELETE FROM players');
+            if ($pdo) {
+                if ($id) {
+                    $stmt = $pdo->prepare('DELETE FROM players WHERE id = ?');
+                    $stmt->execute([$id]);
+                } else {
+                    $pdo->query('DELETE FROM players');
+                }
             }
             echo json_encode(['success' => true, 'message' => 'Operação concluída']);
-        } catch (Exception $e) {
+        } catch (Throwable $e) {
             http_response_code(500);
             echo json_encode(['success' => false, 'error' => $e->getMessage()]);
         }
@@ -323,44 +370,49 @@ if (preg_match('#^players(?:/(.*))?$#', $action, $m)) {
 // ============================================================================
 // 4. OUTRAS ROTAS (BOOKINGS, TOURNAMENTS, MESSAGES)
 // ============================================================================
-if ($action === 'bookings') {
-    if ($method === 'GET') {
-        try {
+if ($action === 'bookings' && $method === 'GET') {
+    try {
+        if ($pdo) {
             $stmt = $pdo->query('SELECT * FROM court_bookings ORDER BY booking_date DESC, time_slot ASC');
             $bookings = $stmt->fetchAll();
-            echo json_encode(['success' => true, 'data' => $bookings]);
-        } catch (Exception $e) {
-            echo json_encode(['success' => true, 'data' => []]);
+        } else {
+            $bookings = [];
         }
-        exit;
+        echo json_encode(['success' => true, 'data' => $bookings]);
+    } catch (Throwable $e) {
+        echo json_encode(['success' => true, 'data' => []]);
     }
+    exit;
 }
 
-if ($action === 'tournaments') {
-    if ($method === 'GET') {
-        try {
+if ($action === 'tournaments' && $method === 'GET') {
+    try {
+        if ($pdo) {
             $stmt = $pdo->query('SELECT * FROM tournaments ORDER BY start_date DESC');
             $tournaments = $stmt->fetchAll();
-            echo json_encode(['success' => true, 'data' => $tournaments]);
-        } catch (Exception $e) {
-            echo json_encode(['success' => true, 'data' => []]);
+        } else {
+            $tournaments = [];
         }
-        exit;
+        echo json_encode(['success' => true, 'data' => $tournaments]);
+    } catch (Throwable $e) {
+        echo json_encode(['success' => true, 'data' => []]);
     }
+    exit;
 }
 
-if ($action === 'messages') {
-    if ($method === 'GET') {
-        try {
+if ($action === 'messages' && $method === 'GET') {
+    try {
+        if ($pdo) {
             $stmt = $pdo->query('SELECT * FROM chat_messages ORDER BY created_at ASC');
             $msgs = $stmt->fetchAll();
-            echo json_encode(['success' => true, 'data' => $msgs]);
-        } catch (Exception $e) {
-            echo json_encode(['success' => true, 'data' => []]);
+        } else {
+            $msgs = [];
         }
-        exit;
+        echo json_encode(['success' => true, 'data' => $msgs]);
+    } catch (Throwable $e) {
+        echo json_encode(['success' => true, 'data' => []]);
     }
+    exit;
 }
 
-// Resposta Padrão
 echo json_encode(['success' => true, 'message' => 'API PHP Tennis Condé 2 Ativa', 'action' => $action]);
