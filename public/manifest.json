@@ -1,0 +1,17 @@
+{
+  "short_name": "Tennis Condé 2",
+  "name": "Tennis Condé 2 - Torneios & Rankings",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#0f172a",
+  "theme_color": "#10b981",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "description": "Plataforma oficial do Tennis Condé 2 para organização de torneios, chaves de eliminatórias, rankings de classes, agendamento de quadras e placar eletrônico."
+}

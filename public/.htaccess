@@ -1,0 +1,25 @@
+# Configuração Apache para HostGator cPanel - Tennis Condé 2
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+
+  # 1. Roteamento de API para o script PHP nativo
+  RewriteRule ^api/(.*)$ api.php?action=$1 [QSA,L]
+
+  # 2. SPA Fallback para React (index.html)
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^ index.html [L]
+</IfModule>
+
+# Habilitar CORS caso necessário
+<IfModule mod_headers.c>
+  Header set Access-Control-Allow-Origin "*"
+  Header set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+  Header set Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With"
+</IfModule>
+
+# Tipos MIME corretos
+AddType application/javascript .js .mjs
+AddType text/css .css
+AddType application/json .json

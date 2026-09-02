@@ -1,0 +1,6 @@
+{
+  "name": "MatchPoint Tennis",
+  "description": "Plataforma oficial do Tennis Condé 2 (tennisconde2.com) para torneios com chaves de mata-mata, rankings, agendamento de quadras e placar eletrônico com MySQL.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
